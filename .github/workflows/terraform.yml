@@ -1,0 +1,161 @@
+name: Terraform
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Ação a executar'
+        required: true
+        default: plan
+        type: choice
+        options: [plan, apply, destroy]
+
+# Nunca deixar dois applies mexerem no mesmo state ao mesmo tempo. O backend S3
+# já trava com use_lockfile, mas o segundo job falharia feio em vez de esperar.
+# cancel-in-progress fica false: cancelar um apply pela metade deixa recursos
+# criados fora do state.
+concurrency:
+  group: terraform-database
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pull-requests: write
+
+env:
+  AWS_REGION: sa-east-1
+  TF_IN_AUTOMATION: 'true'
+  # Sem profile no CI — as credenciais vêm dos secrets abaixo.
+  TF_VAR_aws_profile: ''
+
+jobs:
+  plan:
+    name: Plan
+    runs-on: ubuntu-latest
+    if: github.event_name != 'workflow_dispatch' || inputs.action == 'plan'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.15.8
+          terraform_wrapper: false
+
+      - name: Format check
+        run: terraform fmt -check -recursive -diff
+
+      - name: Init
+        run: terraform init -input=false
+
+      # Falha cedo e com mensagem clara se a rede ainda não existe, em vez de
+      # deixar o plan estourar num erro obscuro de output inexistente.
+      - name: Conferir se a rede já foi provisionada
+        run: |
+          set -euo pipefail
+          if ! aws s3api head-object --bucket "oficina-backend-tfstate-765465309229" \
+               --key "k8s/terraform.tfstate" >/dev/null 2>&1; then
+            echo "::error::State de rede não encontrado. Rode o apply de oficina-infra-k8s primeiro."
+            exit 1
+          fi
+
+      - name: Validate
+        run: terraform validate -no-color
+
+      - name: Plan
+        id: plan
+        run: |
+          set -euo pipefail
+          terraform plan -input=false -no-color -out=tfplan
+          terraform show -no-color tfplan > plan.txt
+
+      - name: Comentar o plan no PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let plan = fs.readFileSync('plan.txt', 'utf8');
+            // O comentário do GitHub tem limite de 65536 caracteres.
+            const LIMIT = 60000;
+            if (plan.length > LIMIT) {
+              plan = plan.slice(0, LIMIT) + '\n\n... (plan truncado — veja o log completo do job)';
+            }
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `#### Terraform Plan — \`oficina-infra-database\`\n\n<details><summary>Ver plan</summary>\n\n\`\`\`terraform\n${plan}\n\`\`\`\n\n</details>`,
+            });
+
+  apply:
+    name: Apply
+    runs-on: ubuntu-latest
+    if: |
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_dispatch' && inputs.action == 'apply')
+    # Configure required reviewers no Environment "production" para exigir
+    # aprovação manual antes de qualquer mudança em infraestrutura.
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.15.8
+          terraform_wrapper: false
+
+      - name: Init
+        run: terraform init -input=false
+
+      - name: Apply
+        run: terraform apply -input=false -auto-approve
+
+      - name: Outputs
+        run: |
+          echo "### Banco de dados aplicado" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          terraform output >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+  destroy:
+    name: Destroy
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && inputs.action == 'destroy'
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.15.8
+          terraform_wrapper: false
+
+      - name: Init
+        run: terraform init -input=false
+
+      # Destrua SEMPRE este repositório antes do oficina-infra-k8s: o RDS
+      # depende da VPC e das subnets de lá.
+      - name: Destroy
+        run: terraform destroy -input=false -auto-approve

@@ -1,0 +1,11 @@
+# Copie para terraform.tfvars (ignorado pelo git) e ajuste.
+# Em CI este arquivo não existe: as credenciais vêm do ambiente e
+# aws_profile fica vazio (o default).
+
+aws_region   = "sa-east-1"
+aws_profile  = "oficina-fase2"
+project_name = "oficina-backend"
+
+db_instance_class    = "db.t4g.micro"
+db_engine_version    = "16"
+db_allocated_storage = 20
