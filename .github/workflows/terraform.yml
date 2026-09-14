@@ -51,35 +51,51 @@ jobs:
           terraform_version: 1.15.8
           terraform_wrapper: false
 
+      # fmt não depende de estado nenhum, então roda sempre.
       - name: Format check
         run: terraform fmt -check -recursive -diff
 
-      - name: Init
-        run: terraform init -input=false
-
-      # Falha cedo e com mensagem clara se a rede ainda não existe, em vez de
-      # deixar o plan estourar num erro obscuro de output inexistente.
+      # A rede vem do repositório oficina-infra-k8s. Quando ela ainda não
+      # existe — o caso normal entre sessões de trabalho, já que a infra é
+      # destruída para não gerar custo — não há o que planejar.
+      #
+      # Aqui isso é "pular", não "falhar": um X vermelho permanente num
+      # repositório que está correto só ensina todo mundo a ignorar o sinal.
+      # O resumo do job diz exatamente o que aconteceu, e o job de apply
+      # continua tratando a mesma condição como erro.
       - name: Conferir se a rede já foi provisionada
+        id: deps
         run: |
-          set -euo pipefail
-          if ! aws s3api head-object --bucket "oficina-backend-tfstate-765465309229" \
-               --key "k8s/terraform.tfstate" >/dev/null 2>&1; then
-            echo "::error::State de rede não encontrado. Rode o apply de oficina-infra-k8s primeiro."
-            exit 1
+          if ./scripts/check-infra-deps.sh; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "### Plan pulado: a rede ainda não foi provisionada"
+              echo
+              echo "Este repositório lê VPC, subnets privadas e o security group do nó k3s do state de \`oficina-infra-k8s\`. Sem ele não existe estado contra o qual planejar."
+              echo
+              echo "Rode o \`apply\` de [oficina-infra-k8s](https://github.com/Luizustavo/oficina-infra-k8s) e reexecute este workflow."
+            } >> "$GITHUB_STEP_SUMMARY"
           fi
 
+      - name: Init
+        if: steps.deps.outputs.ready == 'true'
+        run: terraform init -input=false
+
       - name: Validate
+        if: steps.deps.outputs.ready == 'true'
         run: terraform validate -no-color
 
       - name: Plan
-        id: plan
+        if: steps.deps.outputs.ready == 'true'
         run: |
           set -euo pipefail
           terraform plan -input=false -no-color -out=tfplan
           terraform show -no-color tfplan > plan.txt
 
       - name: Comentar o plan no PR
-        if: github.event_name == 'pull_request'
+        if: steps.deps.outputs.ready == 'true' && github.event_name == 'pull_request'
         uses: actions/github-script@v7
         with:
           script: |
@@ -119,6 +135,11 @@ jobs:
         with:
           terraform_version: 1.15.8
           terraform_wrapper: false
+
+      # Aqui a dependência ausente é erro: um apply que vira no-op silencioso
+      # é pior que um apply que falha.
+      - name: Conferir se a rede já foi provisionada
+        run: ./scripts/check-infra-deps.sh
 
       - name: Init
         run: terraform init -input=false
