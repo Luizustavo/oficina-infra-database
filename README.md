@@ -9,6 +9,21 @@ Infraestrutura do **banco de dados gerenciado** do sistema de gestão de oficina
 
 ---
 
+## Deploy ativo
+
+| Recurso | Como obter o valor atual |
+|---|---|
+| Endpoint do RDS | `terraform output -raw rds_endpoint` |
+| Connection string | `terraform output -raw database_url` (sensível) |
+
+O banco **não tem endereço público** — só o nó k3s e a Lambda de autenticação alcançam a porta 5432, e é assim de propósito. Quem consome os dados é a aplicação, pelo API Gateway: **https://dzsca8yk0b.execute-api.sa-east-1.amazonaws.com**
+
+Swagger da aplicação: **https://dzsca8yk0b.execute-api.sa-east-1.amazonaws.com/api/docs**
+
+> A infraestrutura é destruída ao final de cada sessão de trabalho para não consumir crédito. Enquanto estiver fora, os endereços não respondem — e alguns mudam a cada novo `apply`. O vídeo de demonstração mostra o ambiente no ar.
+
+---
+
 ## ⚠️ Depende de `oficina-infra-k8s`
 
 Este repositório **não cria rede**. Ele lê a VPC, as subnets privadas e o security group do nó k3s do state de [`oficina-infra-k8s`](https://github.com/Luizustavo/oficina-infra-k8s), via `terraform_remote_state` em modo somente leitura (`data.tf`).
@@ -97,6 +112,14 @@ terraform output -raw database_url
 Ele já vem com `?sslmode=no-verify`: o RDS exige conexão criptografada, e o driver usado em runtime (`@prisma/adapter-pg`) não negocia TLS a partir de uma URL simples. O certificado do RDS não está na trust store do Node, então `sslmode=require` puro falha na verificação.
 
 Use o valor para popular o Secret do Kubernetes descrito em `oficina-backend/k8s/README.md`.
+
+---
+
+## Sobre Dockerfile
+
+Este repositório **não tem Dockerfile, e não deveria ter**. Ele provisiona uma instância gerenciada de banco de dados com Terraform; não há imagem para construir.
+
+O `Dockerfile` da aplicação vive em [`oficina-backend`](https://github.com/Luizustavo/oficina-backend/blob/main/Dockerfile). O schema do banco é versionado com Prisma Migrate, no mesmo repositório.
 
 ---
 
